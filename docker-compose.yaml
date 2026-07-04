@@ -1,0 +1,45 @@
+####
+#### Kubernetes MCP Server — local bootstrap via Docker Compose (HTTP + SSE)
+####
+#### This compose file runs the server in "bootstrap UI" mode:
+####   - /mcp is protected by internal OAuth (PKCE)
+####   - the server does NOT connect to Kubernetes until you validate a kubeconfig in the browser
+####   - kubeconfig is persisted in a named volume mounted at /home/nonroot/.kube
+####
+#### Quickstart:
+####   docker compose up --build
+####
+#### Then open:
+####   http://localhost:9890/kube/login
+####
+#### MCP client URL:
+####   http://localhost:9890/mcp
+####
+services:
+  kubernetes-mcp-server:
+    image: kubernetes-mcp-server:local
+
+    build:
+      context: .
+
+    command:
+      - --port
+      - "8080"
+      - --bootstrap-ui
+      - --cluster-provider
+      - kubeconfig
+      - --kubeconfig
+      - /home/nonroot/.kube/config
+
+    ports:
+      # Map a unique host port, matching the local remote-MCP convention used
+      # by the Viasat MCP servers.
+      - "9790:8080"
+
+    restart: unless-stopped
+
+    volumes:
+      - kubeconfig:/home/nonroot/.kube
+
+volumes:
+  kubeconfig:

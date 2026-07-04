@@ -17,6 +17,7 @@ import (
 
 	"k8s.io/klog/v2"
 
+	"github.com/containers/kubernetes-mcp-server/pkg/bootstrap"
 	"github.com/containers/kubernetes-mcp-server/pkg/config"
 	"github.com/containers/kubernetes-mcp-server/pkg/klogutil"
 	"github.com/containers/kubernetes-mcp-server/pkg/mcp"
@@ -106,7 +107,7 @@ func statsHandler(mcpServer *mcp.Server) http.HandlerFunc {
 	}
 }
 
-func Serve(ctx context.Context, mcpServer *mcp.Server, cfgState *config.StaticConfigState, oauthState *oauth.State) error {
+func Serve(ctx context.Context, mcpServer *mcp.Server, cfgState *config.StaticConfigState, oauthState *oauth.State, bootstrapServer *bootstrap.Server) error {
 	logger := klog.FromContext(ctx)
 	// Only fields read below are startup-only; middleware reloads via cfgState.
 	staticConfig := cfgState.Load()
@@ -145,9 +146,19 @@ func Serve(ctx context.Context, mcpServer *mcp.Server, cfgState *config.StaticCo
 
 	sseServer := mcpServer.ServeSse()
 	streamableHttpServer := mcpServer.ServeHTTP()
-	mux.Handle(sseEndpoint, sseServer)
-	mux.Handle(sseMessageEndpoint, sseServer)
-	mux.Handle(mcpEndpoint, streamableHttpServer)
+
+	var sseHandler http.Handler = sseServer
+	var messageHandler http.Handler = sseServer
+	var mcpHandler http.Handler = streamableHttpServer
+	if bootstrapServer != nil {
+		bootstrapServer.RegisterRoutes(mux)
+		sseHandler = bootstrapServer.Protect(sseHandler)
+		messageHandler = bootstrapServer.Protect(messageHandler)
+		mcpHandler = bootstrapServer.Protect(mcpHandler)
+	}
+	mux.Handle(sseEndpoint, sseHandler)
+	mux.Handle(sseMessageEndpoint, messageHandler)
+	mux.Handle(mcpEndpoint, mcpHandler)
 	mux.HandleFunc(healthEndpoint, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

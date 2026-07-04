@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/containers/kubernetes-mcp-server/pkg/api"
+	"github.com/containers/kubernetes-mcp-server/pkg/bootstrap"
 	"github.com/containers/kubernetes-mcp-server/pkg/config"
 	internalhttp "github.com/containers/kubernetes-mcp-server/pkg/http"
 	"github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
@@ -74,6 +76,7 @@ const (
 	flagReadOnly             = "read-only"
 	flagDisableDestructive   = "disable-destructive"
 	flagStateless            = "stateless"
+	flagBootstrapUI          = "bootstrap-ui"
 	flagRequireOAuth         = "require-oauth"
 	flagOAuthAudience        = "oauth-audience"
 	flagAuthorizationURL     = "authorization-url"
@@ -99,6 +102,7 @@ type MCPServerOptions struct {
 	ReadOnly             bool
 	DisableDestructive   bool
 	Stateless            bool
+	BootstrapUI          bool
 	RequireOAuth         bool
 	OAuthAudience        string
 	AuthorizationURL     string
@@ -172,6 +176,7 @@ func NewMCPServer(streams genericiooptions.IOStreams) *cobra.Command {
 	cmd.Flags().BoolVar(&o.ReadOnly, flagReadOnly, o.ReadOnly, "If true, only tools annotated with readOnlyHint=true are exposed")
 	cmd.Flags().BoolVar(&o.DisableDestructive, flagDisableDestructive, o.DisableDestructive, "If true, tools annotated with destructiveHint=true are disabled")
 	cmd.Flags().BoolVar(&o.Stateless, flagStateless, o.Stateless, "If true, run the MCP server in stateless mode (disables tool/prompt change notifications). Useful for container deployments and load balancing. Default is false (stateful mode)")
+	cmd.Flags().BoolVar(&o.BootstrapUI, flagBootstrapUI, o.BootstrapUI, "Enable a local bootstrap OAuth UI (/kube/login) and protect /mcp with internal OAuth (no Kubernetes API calls until configured). Only valid in HTTP mode.")
 	cmd.Flags().BoolVar(&o.RequireOAuth, flagRequireOAuth, o.RequireOAuth, "If true, requires OAuth authorization as defined in the Model Context Protocol (MCP) specification. This flag is ignored if transport type is stdio")
 	_ = cmd.Flags().MarkHidden(flagRequireOAuth)
 	cmd.Flags().StringVar(&o.OAuthAudience, flagOAuthAudience, o.OAuthAudience, "OAuth audience for token claims validation. Optional. If not set, the audience is not validated. Only valid if require-oauth is enabled.")
@@ -203,6 +208,19 @@ func (m *MCPServerOptions) Complete(ctx context.Context, cmd *cobra.Command) err
 	}
 
 	m.loadFlags(cmd)
+
+	if m.StaticConfig.BootstrapUI {
+		// Bootstrap UI uses internal sealed-token OAuth for MCP auth and always
+		// connects to Kubernetes using kubeconfig credentials (not per-user bearer).
+		m.StaticConfig.RequireOAuth = false
+		m.StaticConfig.ClusterAuthMode = api.ClusterAuthKubeconfig
+		if m.StaticConfig.ClusterProviderStrategy == "" {
+			m.StaticConfig.ClusterProviderStrategy = api.ClusterProviderKubeConfig
+		}
+		if m.StaticConfig.KubeConfig == "" {
+			m.StaticConfig.KubeConfig = filepath.Join(mustUserHomeDir(), ".kube", "config")
+		}
+	}
 
 	sink, err := logging.New(m.StaticConfig, m.Out, m.ErrOut)
 	if err != nil {
@@ -245,6 +263,9 @@ func (m *MCPServerOptions) loadFlags(cmd *cobra.Command) {
 	}
 	if cmd.Flag(flagStateless).Changed {
 		m.StaticConfig.Stateless = m.Stateless
+	}
+	if cmd.Flag(flagBootstrapUI).Changed {
+		m.StaticConfig.BootstrapUI = m.BootstrapUI
 	}
 	if cmd.Flag(flagToolsets).Changed {
 		m.StaticConfig.Toolsets = m.Toolsets
@@ -337,16 +358,25 @@ func (m *MCPServerOptions) Run(ctx context.Context) error {
 	oauthState := internaloauth.NewState(internaloauth.SnapshotFromConfig(m.StaticConfig, oidcProvider, httpClient))
 	cfgState := config.NewStaticConfigState(m.StaticConfig)
 
-	provider, err := kubernetes.NewProvider(
-		ctx,
-		m.StaticConfig,
-		kubernetes.WithTokenExchange(oauthState),
-		kubernetes.WithBaseConfigProvider(func() api.BaseConfig {
-			return cfgState.Load()
-		}),
-	)
-	if err != nil {
-		return fmt.Errorf("unable to create kubernetes target provider: %w", err)
+	baseCfgProvider := func() api.BaseConfig {
+		return cfgState.Load()
+	}
+
+	var provider kubernetes.Provider
+	var dynProvider *kubernetes.DynamicProvider
+	if m.StaticConfig.BootstrapUI {
+		dynProvider = kubernetes.NewDynamicProvider()
+		provider = dynProvider
+	} else {
+		provider, err = kubernetes.NewProvider(
+			ctx,
+			m.StaticConfig,
+			kubernetes.WithTokenExchange(oauthState),
+			kubernetes.WithBaseConfigProvider(baseCfgProvider),
+		)
+		if err != nil {
+			return fmt.Errorf("unable to create kubernetes target provider: %w", err)
+		}
 	}
 
 	mcpServer, err := mcp.NewServer(ctx, mcp.Configuration{
@@ -374,7 +404,26 @@ func (m *MCPServerOptions) Run(ctx context.Context) error {
 	}
 
 	if m.StaticConfig.Port != "" {
-		return internalhttp.Serve(ctx, mcpServer, cfgState, oauthState)
+		var bootstrapServer *bootstrap.Server
+		if m.StaticConfig.BootstrapUI {
+			bootstrapServer, err = bootstrap.NewServer(bootstrap.Options{
+				CfgState:        cfgState,
+				McpServer:       mcpServer,
+				DynamicProvider: dynProvider,
+				ProviderBuilder: func(ctx context.Context) (kubernetes.Provider, error) {
+					return kubernetes.NewProvider(
+						ctx,
+						cfgState.Load(),
+						kubernetes.WithTokenExchange(oauthState),
+						kubernetes.WithBaseConfigProvider(baseCfgProvider),
+					)
+				},
+			})
+			if err != nil {
+				return fmt.Errorf("failed to initialize bootstrap UI: %w", err)
+			}
+		}
+		return internalhttp.Serve(ctx, mcpServer, cfgState, oauthState, bootstrapServer)
 	}
 
 	if err := mcpServer.ServeStdio(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -382,6 +431,16 @@ func (m *MCPServerOptions) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func mustUserHomeDir() string {
+	h, err := os.UserHomeDir()
+	if err != nil || h == "" {
+		// os.UserHomeDir should always succeed in supported environments.
+		// Falling back to "/" keeps file-path joins deterministic.
+		return "/"
+	}
+	return h
 }
 
 // setupSIGHUPHandler sets up a signal handler to reload configuration on SIGHUP.

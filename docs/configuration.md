@@ -480,6 +480,7 @@ Configure OAuth/OIDC authentication for HTTP mode deployments.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `bootstrap_ui` | boolean | `false` | When `true`, enables local browser bootstrap mode. The server acts as its own OAuth 2.1 authorization server, protects `/mcp` with sealed bearer tokens, serves `/kube/login`, and does not connect to Kubernetes until a kubeconfig is validated. Requires HTTP mode (`port`) and `cluster_auth_mode = "kubeconfig"`. |
 | `require_oauth` | boolean | `false` | When `true`, requires OAuth authentication for all requests. This **DOES NOT** determine validation strategy, which is done separately by `authorization_url` and `skip_jwt_verification` |
 | `oauth_audience` | string | `""` | Valid audience for OAuth tokens (for offline JWT claim validation). |
 | `authorization_url` | string | `""` | URL of the OIDC authorization server for token validation and STS exchange. |
@@ -498,6 +499,29 @@ Configure OAuth/OIDC authentication for HTTP mode deployments.
 | `cluster_auth_mode` | string | `""` | Cluster auth mode: `passthrough` (forward Authorization header when present, fall back to kubeconfig when absent) or `kubeconfig` (always use kubeconfig credentials). Defaults to `passthrough`. |
 | `certificate_authority` | string | `""` | Path to CA certificate for validating authorization server connections. |
 | `server_url` | string | `""` | Public URL of the MCP server (used for OAuth metadata). |
+
+#### Bootstrap UI mode
+
+Bootstrap UI mode is separate from the external OAuth/OIDC `require_oauth` flow. In this mode, keep `require_oauth = false`; the server provides internal OAuth discovery, dynamic client registration, PKCE authorization, and sealed access tokens for MCP clients. Kubernetes access always uses the kubeconfig selected through `/kube/login`.
+
+**Example:**
+```toml
+port = "8080"
+bootstrap_ui = true
+cluster_auth_mode = "kubeconfig"
+cluster_provider_strategy = "kubeconfig"
+kubeconfig = "/home/nonroot/.kube/config"
+```
+
+`bootstrap_ui` is not compatible with `require_oauth`, `oauth_audience`, `authorization_url`, `skip_jwt_verification`, or `certificate_authority`. `server_url` may still be set when the server is behind a proxy so OAuth metadata advertises the correct public URL.
+
+Set `MCP_AUTH_SECRET` to a stable 32-byte base64url-encoded value when tokens should survive process restarts:
+
+```shell
+MCP_AUTH_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+```
+
+If `MCP_AUTH_SECRET` is not set, the server generates an ephemeral key for the current process.
 
 **Example (with client secret):**
 ```toml

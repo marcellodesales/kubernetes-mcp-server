@@ -578,6 +578,58 @@ func (s *ValidateSuite) TestSkipJWTVerification() {
 		s.NoError(cfg.Validate(s.T().Context()))
 	})
 }
+func (s *ValidateSuite) TestBootstrapUI() {
+	s.Run("bootstrap ui with http mode and kubeconfig auth is accepted", func() {
+		cfg := s.validConfig()
+		cfg.Port = "8080"
+		cfg.BootstrapUI = true
+		cfg.ClusterAuthMode = api.ClusterAuthKubeconfig
+		cfg.ClusterProviderStrategy = api.ClusterProviderKubeConfig
+		s.NoError(cfg.Validate(s.T().Context()))
+	})
+
+	s.Run("bootstrap ui requires http mode", func() {
+		cfg := s.validConfig()
+		cfg.BootstrapUI = true
+		cfg.ClusterAuthMode = api.ClusterAuthKubeconfig
+		err := cfg.Validate(s.T().Context())
+		s.Require().Error(err)
+		s.Contains(err.Error(), "bootstrap_ui requires port")
+	})
+
+	s.Run("bootstrap ui rejects require_oauth", func() {
+		cfg := s.validConfig()
+		cfg.Port = "8080"
+		cfg.BootstrapUI = true
+		cfg.RequireOAuth = true
+		cfg.AuthorizationURL = "https://example.com/auth"
+		cfg.ClusterAuthMode = api.ClusterAuthKubeconfig
+		err := cfg.Validate(s.T().Context())
+		s.Require().Error(err)
+		s.Contains(err.Error(), "not compatible with require_oauth=true")
+	})
+
+	s.Run("bootstrap ui rejects external oauth fields", func() {
+		cfg := s.validConfig()
+		cfg.Port = "8080"
+		cfg.BootstrapUI = true
+		cfg.OAuthAudience = "kubernetes-mcp-server"
+		cfg.ClusterAuthMode = api.ClusterAuthKubeconfig
+		err := cfg.Validate(s.T().Context())
+		s.Require().Error(err)
+		s.Contains(err.Error(), "not compatible with oauth_audience")
+	})
+
+	s.Run("bootstrap ui requires kubeconfig cluster auth mode", func() {
+		cfg := s.validConfig()
+		cfg.Port = "8080"
+		cfg.BootstrapUI = true
+		cfg.ClusterAuthMode = api.ClusterAuthPassthrough
+		err := cfg.Validate(s.T().Context())
+		s.Require().Error(err)
+		s.Contains(err.Error(), `bootstrap_ui requires cluster_auth_mode="kubeconfig"`)
+	})
+}
 
 func (s *ValidateSuite) TestClusterAuthMode() {
 	s.Run("passthrough without require_oauth is accepted", func() {

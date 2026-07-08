@@ -75,7 +75,7 @@ func (s *BaseHttpSuite) StartServer() {
 		cancelCtx = klog.NewContext(cancelCtx, s.Logger)
 	}
 	group.Go(func() error {
-		return Serve(cancelCtx, s.mcpServer, config.NewStaticConfigState(s.StaticConfig), s.OAuthState)
+		return Serve(cancelCtx, s.mcpServer, config.NewStaticConfigState(s.StaticConfig), s.OAuthState, nil)
 	})
 	s.WaitForShutdown = group.Wait
 	s.Require().NoError(test.WaitForServer(tcpAddr), "HTTP server did not start in time")
@@ -158,7 +158,7 @@ func (c *httpContext) beforeEach(t *testing.T) {
 	group, gc := errgroup.WithContext(timeoutCtx)
 	cancelCtx, c.StopServer = context.WithCancel(gc)
 	group.Go(func() error {
-		return Serve(klog.NewContext(cancelCtx, c.logger), mcpServer, config.NewStaticConfigState(c.StaticConfig), c.OAuthState)
+		return Serve(klog.NewContext(cancelCtx, c.logger), mcpServer, config.NewStaticConfigState(c.StaticConfig), c.OAuthState, nil)
 	})
 	c.WaitForShutdown = group.Wait
 	// Wait for HTTP server to start (using net)

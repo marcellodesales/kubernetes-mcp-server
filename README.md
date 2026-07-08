@@ -201,6 +201,7 @@ uvx kubernetes-mcp-server@latest --help
 | `--read-only`             | If set, the MCP server will run in read-only mode, meaning it will not allow any write operations (create, update, delete) on the Kubernetes cluster. This is useful for debugging or inspecting the cluster without making changes.                                                          |
 | `--disable-destructive`   | If set, the MCP server will disable all destructive operations (delete, update, etc.) on the Kubernetes cluster. This is useful for debugging or inspecting the cluster without accidentally making changes. This option has no effect when `--read-only` is used.                            |
 | `--stateless`             | If set, the MCP server will run in stateless mode, disabling tool and prompt change notifications. This is useful for container deployments, load balancing, and serverless environments where maintaining client state is not desired.                                                       |
+| `--bootstrap-ui`          | Enables local HTTP bootstrap mode. The server protects `/mcp` with internal OAuth, serves `/kube/login`, and waits for a validated kubeconfig before connecting to Kubernetes. Requires `--port`.                                                                                              |
 | `--toolsets`              | Comma-separated list of toolsets to enable. Check the [🛠️ Tools and Functionalities](#tools-and-functionalities) section for more information.                                                                                                                                                |
 | `--disable-multi-cluster` | If set, the MCP server will disable multi-cluster support and will only use the current context from the kubeconfig file. This is useful if you want to restrict the MCP server to a single cluster.                                                                                          |
 | `--cluster-provider`      | Cluster provider strategy to use (one of: kubeconfig, in-cluster, kcp, disabled). If not set, the server will auto-detect based on the environment.                                                                                                                                           |
@@ -243,6 +244,24 @@ For comprehensive TOML configuration documentation, including:
 - OAuth/OIDC authentication for HTTP mode ([Keycloak](docs/KEYCLOAK_OIDC_SETUP.md), [Microsoft Entra ID](docs/ENTRA_ID_SETUP.md))
 
 See the **[Configuration Reference](docs/configuration.md)**.
+
+### Bootstrap UI mode
+
+Bootstrap UI mode is useful for containerized local runs where the server should not connect to Kubernetes until a user supplies a kubeconfig in the browser:
+
+```shell
+docker compose up --build
+```
+
+Then open `http://localhost:9890/kube/login`, choose or paste a kubeconfig, and let the server validate it before MCP clients use `http://localhost:9890/mcp`.
+
+For direct binary usage:
+
+```shell
+kubernetes-mcp-server --port 9890 --bootstrap-ui --cluster-provider kubeconfig --kubeconfig ~/.kube/config
+```
+
+Set `MCP_AUTH_SECRET` to a stable 32-byte base64url value if issued OAuth tokens must survive server restarts. If it is unset, the server uses an ephemeral key for the current process.
 
 ## 📊 MCP Logging <a id="mcp-logging"></a>
 

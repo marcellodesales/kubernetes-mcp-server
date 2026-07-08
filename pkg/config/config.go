@@ -61,6 +61,10 @@ type StaticConfig struct {
 	Prompts []api.Prompt `toml:"prompts,omitempty"`
 
 	// Authorization-related fields
+	// BootstrapUI enables a local bootstrap flow for HTTP mode where the server
+	// acts as its own OAuth 2.1 Authorization Server and does not connect to
+	// Kubernetes until the user provides a kubeconfig via /kube/login.
+	BootstrapUI bool `toml:"bootstrap_ui,omitempty"`
 	// RequireOAuth indicates whether the server requires OAuth for authentication.
 	RequireOAuth bool `toml:"require_oauth,omitempty"`
 	// OAuthAudience is the valid audience for the OAuth tokens, used for offline JWT claim validation.
@@ -505,7 +509,7 @@ func (c *StaticConfig) Validate(ctx context.Context) error {
 			return fmt.Errorf("invalid cluster-provider: %s, valid values are: %s", c.ClusterProviderStrategy, strings.Join(c.providerStrategies, ", "))
 		}
 	}
-	if !c.RequireOAuth && (c.OAuthAudience != "" || c.AuthorizationURL != "" || c.ServerURL != "" || c.CertificateAuthority != "") {
+	if !c.RequireOAuth && !c.BootstrapUI && (c.OAuthAudience != "" || c.AuthorizationURL != "" || c.ServerURL != "" || c.CertificateAuthority != "") {
 		return fmt.Errorf("oauth-audience, authorization-url, server-url and certificate-authority are only valid if require-oauth is enabled. Missing --port may implicitly set require-oauth to false")
 	}
 	if c.AuthorizationURL != "" {
@@ -548,6 +552,9 @@ func (c *StaticConfig) Validate(ctx context.Context) error {
 	if err := c.ValidateRequireTLS(); err != nil {
 		return err
 	}
+	if err := c.validateBootstrapUI(); err != nil {
+		return err
+	}
 	if err := c.ValidateClusterAuthMode(); err != nil {
 		return err
 	}
@@ -559,6 +566,25 @@ func (c *StaticConfig) Validate(ctx context.Context) error {
 	}
 	if err := c.HTTP.Validate(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (c *StaticConfig) validateBootstrapUI() error {
+	if !c.BootstrapUI {
+		return nil
+	}
+	if c.Port == "" {
+		return fmt.Errorf("bootstrap_ui requires port to be set (HTTP mode)")
+	}
+	if c.RequireOAuth {
+		return fmt.Errorf("bootstrap_ui is not compatible with require_oauth=true (bootstrap uses internal OAuth with sealed tokens)")
+	}
+	if c.OAuthAudience != "" || c.AuthorizationURL != "" || c.SkipJWTVerification || c.CertificateAuthority != "" {
+		return fmt.Errorf("bootstrap_ui is not compatible with oauth_audience/authorization_url/skip_jwt_verification/certificate_authority; disable them or disable bootstrap_ui")
+	}
+	if c.ResolveClusterAuthMode() != api.ClusterAuthKubeconfig {
+		return fmt.Errorf("bootstrap_ui requires cluster_auth_mode=%q", api.ClusterAuthKubeconfig)
 	}
 	return nil
 }

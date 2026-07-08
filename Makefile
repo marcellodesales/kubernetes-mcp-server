@@ -4,8 +4,8 @@
 .DEFAULT_GOAL := help
 
 PACKAGE = $(shell go list -m)
-GIT_COMMIT_HASH = $(shell git rev-parse HEAD)
-GIT_VERSION = $(shell git describe --tags --always --dirty)
+GIT_COMMIT_HASH = $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
+GIT_VERSION = $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
 BUILD_TIME = $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 BINARY_NAME = kubernetes-mcp-server
 WEBSITE_URL = https://github.com/containers/kubernetes-mcp-server

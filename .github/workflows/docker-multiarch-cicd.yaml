@@ -1,0 +1,51 @@
+name: 🐳 docker-multiarch-cicd
+run-name: 🐳 Docker Multi-Arch CICD PR ${{ github.event.pull_request.number }} commit ${{ github.event.pull_request.head.sha }}
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  push:
+    branches:
+      - main
+      - develop
+    tags:
+      - 'v*'
+
+env:
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
+
+jobs:
+  setup:
+    name: 🔧 setup
+    runs-on: ubuntu-latest
+    outputs:
+      dockerhub-token: ${{ steps.secrets.outputs.token }}
+      dockerhub-username: ${{ steps.secrets.outputs.username }}
+    steps:
+      - name: Load secrets
+        id: secrets
+        run: |
+          echo "username=${{ secrets.DOCKER_REGISTRY_USERNAME }}"
+          echo "token=${{ secrets.DOCKER_REGISTRY_TOKEN }}"
+
+  docker-multiarch:
+    name: 🐳 docker
+    needs: [ setup ]
+    uses: vionix-proj/github-platform/.github/workflows/docker-multiarch-cicd.yaml@main
+    permissions:
+      contents: write           # Make and push commits to the repo 
+      packages: write           # Create a docker package in the repo
+      id-token: write           # Acquire a github token 
+      attestations: write       # Submit attestations for the build
+      artifact-metadata: write  # Submit SBOM for the build
+      pull-requests: write      # Write back to the Pull Request
+    with:
+      registry: ghcr.io
+      platforms: linux/amd64,linux/arm64
+      docker-compose-file-name: docker-compose.yaml
+      dockerhub-registry: docker.io
+      dockerhub-namespace: ${{ github.repository_owner }}
+      dockerhub-registry-username: ${{ needs.setup.outputs.dockerhub-username }}
+      dockerhub-registry-token: ${{ needs.setup.outputs.dockerhub-token }}
+      push-attestations: "false"

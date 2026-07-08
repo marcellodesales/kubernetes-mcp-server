@@ -10,10 +10,14 @@
 ####   docker compose up --build
 ####
 #### Then open:
-####   http://localhost:9890/kube/login
+####   http://localhost:9790/kube/login
 ####
 #### MCP client URL:
-####   http://localhost:9890/mcp
+####   http://localhost:9790/mcp
+####
+#### Optional: set MCP_AUTH_SECRET in a .env file to keep bearer tokens valid across restarts.
+####   If unset, the server generates one at startup and logs it at INFO — copy it to .env to reuse.
+####   Generate with: openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
 ####
 services:
   kubernetes-mcp-server:
@@ -37,6 +41,14 @@ services:
       - "9790:8080"
 
     restart: unless-stopped
+
+    environment:
+      # OAuth signing key (32 bytes, base64url). Optional — if unset, the server generates
+      # one at startup and logs it at INFO. Set it to keep bearer tokens valid across restarts.
+      MCP_AUTH_SECRET: ${MCP_AUTH_SECRET:-}
+
+      # Access token lifetime. Default: 10h. Override to shorten or extend.
+      MCP_AUTH_ACCESS_TTL: ${MCP_AUTH_ACCESS_TTL:-10h}
 
     volumes:
       - kubeconfig:/home/nonroot/.kube

@@ -123,12 +123,13 @@ func Serve(ctx context.Context, mcpServer *mcp.Server, cfgState *config.StaticCo
 	instrumentedHandler := metricsMiddleware(wrappedMux, mcpServer)
 
 	// Note: WriteTimeout is intentionally omitted - it would kill SSE streams.
-	// ReadHeaderTimeout provides Slowloris protection; other timeouts are left
-	// at Go defaults since MCP clients maintain persistent connections.
+	// ReadHeaderTimeout provides Slowloris protection. IdleTimeout limits keep-alive
+	// idle time between requests but does not affect active SSE/streaming connections.
 	httpServer := &http.Server{
 		Addr:              ":" + staticConfig.Port,
 		Handler:           instrumentedHandler,
 		ReadHeaderTimeout: staticConfig.HTTP.ReadHeaderTimeout.Duration(),
+		IdleTimeout:       60 * time.Minute,
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},

@@ -388,6 +388,26 @@ func (c *StaticConfig) GetClusterProviderStrategy() string {
 	return c.ClusterProviderStrategy
 }
 
+// BasePath returns the URL path prefix under which this server is publicly mounted
+// (e.g. "/mcps/kubernetes-mcp"), derived from ServerURL. It is empty when the
+// server is served at the host root or ServerURL is unset.
+//
+// A reverse proxy strips the prefix before the request reaches us, so we cannot
+// infer it from the request — only ServerURL carries the public mount point.
+// Interactive HTML/JS emitted to the browser (login form action, fetch() calls)
+// and browser redirects MUST prefix their paths with this, or they resolve against
+// the host root and 404 behind a path prefix.
+func (c *StaticConfig) BasePath() string {
+	if c.ServerURL == "" {
+		return ""
+	}
+	u, err := url.Parse(c.ServerURL)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(u.Path, "/")
+}
+
 func (c *StaticConfig) GetDeniedResources() []api.GroupVersionKind {
 	return c.DeniedResources
 }

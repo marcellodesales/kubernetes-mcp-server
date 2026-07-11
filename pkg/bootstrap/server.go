@@ -499,7 +499,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
-	loginURL := "/kube/login?request=" + url.QueryEscape(sealed)
+	loginURL := s.cfgState.Load().BasePath() + "/kube/login?request=" + url.QueryEscape(sealed)
 	http.Redirect(w, r, loginURL, http.StatusFound)
 }
 
@@ -628,6 +628,11 @@ type kubeLoginView struct {
 	RequestToken string
 	Error        string
 	Pasted       string
+	// BasePath is the public path prefix (e.g. "/mcps/kubernetes-mcp") this server
+	// is mounted under, prepended to the login form action and the /kube/preview
+	// fetch so they resolve behind a reverse-proxy prefix instead of the host root.
+	// Empty at the host root (localhost unchanged).
+	BasePath string
 }
 
 var kubeLoginTemplate = template.Must(template.New("kube-login").Parse(`<!doctype html>
@@ -704,7 +709,7 @@ var kubeLoginTemplate = template.Must(template.New("kube-login").Parse(`<!doctyp
       🔐 Bootstrap mode protects <code>/mcp</code> with internal OAuth and keeps all auth state sealed into short-lived tokens.
     </div>
     {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
-    <form id="kubeForm" method="post" action="/kube/login" enctype="multipart/form-data" autocomplete="off">
+    <form id="kubeForm" method="post" action="{{.BasePath}}/kube/login" enctype="multipart/form-data" autocomplete="off" data-base-path="{{.BasePath}}">
       <div class="steps">
         <button id="stepSource" type="button" class="step active">🔎 1. Source validation<small>Paste, drop, upload, or use existing</small></button>
         <button id="stepReview" type="button" class="step">⏳ 2. Review target<small>Confirm cluster URL and user</small></button>
@@ -764,6 +769,10 @@ var kubeLoginTemplate = template.Must(template.New("kube-login").Parse(`<!doctyp
   <script>
   (function () {
     var form = document.getElementById('kubeForm');
+    // Public path prefix (e.g. "/mcps/kubernetes-mcp") this server is mounted under.
+    // Read from a data attribute (clean HTML-attr context) rather than inlining the
+    // path into a JS string literal, so fetch() resolves behind a reverse proxy.
+    var basePath = (form && form.getAttribute('data-base-path')) || '';
     var paste = document.getElementById('kubeconfigPaste');
     var upload = document.getElementById('kubeconfigUpload');
     var dropZone = document.getElementById('dropZone');
@@ -994,7 +1003,7 @@ var kubeLoginTemplate = template.Must(template.New("kube-login").Parse(`<!doctyp
       try {
         setEnable(false);
         setStatus('info', '🔎 Validating kubeconfig source…');
-        var response = await fetch('/kube/preview', {
+        var response = await fetch(basePath + '/kube/preview', {
           method: 'POST',
           cache: 'no-store',
           headers: {'Content-Type': 'application/json'},
@@ -1493,6 +1502,7 @@ func (s *Server) renderKubeLogin(w http.ResponseWriter, r *http.Request, view ku
 	if view.DefaultMode == "" {
 		view.DefaultMode = "paste"
 	}
+	view.BasePath = s.cfgState.Load().BasePath()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	setNoStoreHeaders(w)
 	if err := kubeLoginTemplate.Execute(w, view); err != nil {

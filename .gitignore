@@ -5,6 +5,13 @@ _output/
 node_modules/
 
 .npmrc
+
+# Local secrets — the bootstrap OAuth signing key (MCP_AUTH_SECRET) lives here.
+# Never commit it: it can decrypt/forge every client registration and access token.
+.env
+.env.*
+!.env.example
+
 kubernetes-mcp-server
 !charts/kubernetes-mcp-server
 !cmd/kubernetes-mcp-server

@@ -261,7 +261,7 @@ For direct binary usage:
 kubernetes-mcp-server --port 9890 --bootstrap-ui --cluster-provider kubeconfig --kubeconfig ~/.kube/config
 ```
 
-Set `MCP_AUTH_SECRET` to a stable 32-byte base64url value if issued OAuth tokens must survive server restarts. If it is unset, the server uses an ephemeral key for the current process.
+Set `MCP_AUTH_SECRET` to a stable 32-byte base64url value so issued OAuth tokens and client registrations survive server restarts. If it is unset, the server generates a new ephemeral key on every start, which invalidates all previously registered clients — they will be shown a "Reconnect required" page. Use a **unique** secret per server, keep it out of version control (e.g. in a gitignored `.env`), and note that **rotating it forces every connected client to re-authenticate once**. See [Signing key persistence and rotation](docs/configuration.md#signing-key-mcp_auth_secret--persistence-and-rotation) for details.
 
 ## 📊 MCP Logging <a id="mcp-logging"></a>
 

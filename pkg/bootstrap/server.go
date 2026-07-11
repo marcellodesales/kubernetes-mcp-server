@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,13 +44,14 @@ type Options struct {
 }
 
 type Server struct {
-	cfgState  *config.StaticConfigState
-	mcpServer *mcp.Server
-	dyn       *kubernetes.DynamicProvider
-	buildProv func(ctx context.Context) (kubernetes.Provider, error)
-	validate  func(ctx context.Context, kubeconfigPath string) (*ClusterFacts, error)
-	sealer    *Sealer
-	now       func() time.Time
+	cfgState       *config.StaticConfigState
+	mcpServer      *mcp.Server
+	dyn            *kubernetes.DynamicProvider
+	buildProv      func(ctx context.Context) (kubernetes.Provider, error)
+	validate       func(ctx context.Context, kubeconfigPath string) (*ClusterFacts, error)
+	sealer         *Sealer
+	now            func() time.Time
+	accessTokenTTL time.Duration
 
 	configureMu sync.Mutex
 }
@@ -85,14 +87,24 @@ func NewServer(opts Options) (*Server, error) {
 	}
 
 	return &Server{
-		cfgState:  opts.CfgState,
-		mcpServer: opts.McpServer,
-		dyn:       opts.DynamicProvider,
-		buildProv: opts.ProviderBuilder,
-		validate:  validate,
-		sealer:    sealer,
-		now:       time.Now,
+		cfgState:       opts.CfgState,
+		mcpServer:      opts.McpServer,
+		dyn:            opts.DynamicProvider,
+		buildProv:      opts.ProviderBuilder,
+		validate:       validate,
+		sealer:         sealer,
+		now:            time.Now,
+		accessTokenTTL: durationEnv("MCP_AUTH_ACCESS_TTL", 10*time.Hour),
 	}, nil
+}
+
+func durationEnv(key string, fallback time.Duration) time.Duration {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return fallback
 }
 
 func sealerKeyFromEnv() ([]byte, error) {
@@ -104,6 +116,11 @@ func sealerKeyFromEnv() ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, fmt.Errorf("failed to generate ephemeral auth key: %w", err)
 	}
+	// Log the generated secret so operators can capture it for persistence across restarts.
+	// Set MCP_AUTH_SECRET=<value> to keep bearer tokens valid after a restart.
+	klog.InfoS("MCP_AUTH_SECRET not set — generated ephemeral auth key",
+		"MCP_AUTH_SECRET", base64.RawURLEncoding.EncodeToString(key),
+	)
 	return key, nil
 }
 
@@ -440,11 +457,31 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	reg, err := s.parseClientRegistration(clientID)
 	if err != nil {
-		http.Error(w, "invalid client_id", http.StatusBadRequest)
+		// The client_id is a sealed registration token. Unsealing fails when the
+		// server's signing key (MCP_AUTH_SECRET) was rotated/regenerated since the
+		// client registered, or when the 24h registration TTL has lapsed. Show the
+		// user a recoverable message instead of a bare "invalid client_id".
+		s.renderAuthError(w, r, http.StatusBadRequest, authErrorView{
+			Title:   "Reconnect required",
+			Summary: "This server could not verify your client registration.",
+			Details: []template.HTML{
+				`Your MCP client authorized here before, but the credential it saved (its OAuth <code>client_id</code>) can no longer be verified by this server.`,
+				`The usual cause is that the server restarted or its signing key (<code>MCP_AUTH_SECRET</code>) was rotated, which invalidates every previously issued registration. Client registrations also expire 24 hours after they are created.`,
+			},
+			Steps: reconnectSteps,
+		})
 		return
 	}
 	if !contains(reg.RedirectURIs, redirectURI) {
-		http.Error(w, "redirect_uri is not registered for client", http.StatusBadRequest)
+		s.renderAuthError(w, r, http.StatusBadRequest, authErrorView{
+			Title:   "Redirect address not recognized",
+			Summary: "The redirect_uri in this request is not registered for your client.",
+			Details: []template.HTML{
+				`Your MCP client asked to be redirected to an address that was not part of its original registration. For security this server only redirects to addresses a client registered up front.`,
+				`This usually means the client's saved registration is stale. Reconnecting re-registers the current redirect address.`,
+			},
+			Steps: reconnectSteps,
+		})
 		return
 	}
 
@@ -566,7 +603,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	at := accessToken{
-		tokenBase: newTokenBase(s.now(), 1*time.Hour),
+		tokenBase: newTokenBase(s.now(), s.accessTokenTTL),
 		ClientID:  clientID,
 		Scope:     ac.Scope,
 	}
@@ -578,7 +615,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	resp := tokenResponse{
 		AccessToken: access,
 		TokenType:   "Bearer",
-		ExpiresIn:   3600,
+		ExpiresIn:   int64(s.accessTokenTTL.Seconds()),
 		Scope:       ac.Scope,
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -1284,6 +1321,78 @@ var kubeSuccessTemplate = template.Must(template.New("kube-success").Parse(`<!do
 </body>
 </html>`))
 
+// authErrorView backs authErrorTemplate. Its fields are developer-authored
+// (never request data), so Details/Steps are template.HTML to allow inline
+// <code> formatting without HTML-escaping.
+type authErrorView struct {
+	Title   string
+	Summary string
+	Details []template.HTML
+	Steps   []template.HTML
+}
+
+// reconnectSteps is the standard remediation shown when a client's saved OAuth
+// registration can no longer be honored (rotated signing key or expired
+// registration). Reconnecting forces the client to register again.
+var reconnectSteps = []template.HTML{
+	`In your MCP client, remove or disconnect this server so it drops the stale saved credential. In Claude Code: <code>/mcp</code> &rarr; select this server &rarr; disconnect (or re-run <code>claude mcp add</code>).`,
+	`Reconnect / re-add the server. The client will register again automatically and reopen this login page.`,
+	`Complete the kubeconfig login when the browser opens — access is restored once validation succeeds.`,
+}
+
+// authErrorTemplate renders a browser-facing OAuth failure using the same card
+// styling as the bootstrap login page. RFC 6749 §4.1.2.1 requires that when the
+// client_id or redirect_uri is invalid we inform the user directly instead of
+// redirecting to an untrusted URI — so these are HTML pages, not redirects.
+var authErrorTemplate = template.Must(template.New("auth-error").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kubernetes MCP Server — Reconnect required</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; background:#f5f5f5; margin:0; padding:0; }
+    .card { max-width:640px; margin:7vh auto; background:#fff; padding:24px; border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,0.08); }
+    h1 { margin:0 0 8px 0; font-size:20px; }
+    h2 { margin:0 0 10px 0; font-size:15px; }
+    p { margin:0 0 14px 0; color:#444; font-size:14px; line-height:1.5; }
+    .err { background:#fdecea; border:1px solid #f5c6cb; color:#7a1c1c; padding:12px 14px; border-radius:8px; margin-bottom:16px; font-size:14px; line-height:1.5; }
+    .section { border:1px solid #e6e6e6; border-radius:10px; padding:14px 16px; margin:14px 0; }
+    .section ol { margin:8px 0 0; padding-left:20px; }
+    .section li { margin:8px 0; font-size:14px; color:#333; line-height:1.5; }
+    .note { background:#fff8e1; border-left:4px solid #ff8f00; padding:10px 12px; border-radius:8px; margin-top:14px; font-size:13px; color:#555; line-height:1.5; }
+    code { background:#f1f1f1; padding:1px 5px; border-radius:4px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:0.92em; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Kubernetes MCP Server</h1>
+    <div class="err"><strong>⚠️ {{.Title}}</strong><br/>{{.Summary}}</div>
+    {{range .Details}}<p>{{.}}</p>{{end}}
+    {{if .Steps}}
+    <div class="section">
+      <h2>🔁 How to reconnect</h2>
+      <ol>{{range .Steps}}<li>{{.}}</li>{{end}}</ol>
+    </div>
+    {{end}}
+    <div class="note">
+      🔐 If this keeps happening on every restart, the server is generating a new signing key each time it boots.
+      Set a persistent <code>MCP_AUTH_SECRET</code> (unique per server) so client registrations and tokens survive restarts.
+      Rotating that secret intentionally will always force every connected client through this reconnect flow once.
+    </div>
+  </div>
+</body>
+</html>`))
+
+func (s *Server) renderAuthError(w http.ResponseWriter, r *http.Request, status int, view authErrorView) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	setNoStoreHeaders(w)
+	w.WriteHeader(status)
+	if err := authErrorTemplate.Execute(w, view); err != nil {
+		klog.FromContext(r.Context()).Error(err, "failed to render auth error page")
+	}
+}
+
 func (s *Server) handleKubeLogin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -1489,13 +1598,33 @@ func (s *Server) handleKubeLoginPost(w http.ResponseWriter, r *http.Request) {
 	facts.normalize()
 
 	if oauthReq != "" {
+		// Kubernetes access is already enabled at this point (provider set + config
+		// reloaded above). Only the OAuth code hand-off can still fail if the sealed
+		// auth request can no longer be verified — key rotation, or the 10-minute
+		// auth-request TTL lapsing while the user filled in the login form.
 		areq := authRequest{}
 		if err := s.sealer.Unseal(tokenTypeAuthRequest, oauthReq, &areq); err != nil {
-			s.renderKubeLogin(w, r, kubeLoginView{Error: "Invalid OAuth request", DefaultMode: mode})
+			s.renderAuthError(w, r, http.StatusBadRequest, authErrorView{
+				Title:   "Reconnect required",
+				Summary: "Kubernetes access was enabled, but this sign-in request could not be verified.",
+				Details: []template.HTML{
+					`This server's signing key (<code>MCP_AUTH_SECRET</code>) changed while you were signing in, so the authorization request can no longer be verified.`,
+					`Your kubeconfig was accepted — you only need to restart the sign-in from your MCP client so it can complete the handshake.`,
+				},
+				Steps: reconnectSteps,
+			})
 			return
 		}
 		if err := areq.validate(s.now()); err != nil {
-			s.renderKubeLogin(w, r, kubeLoginView{Error: "OAuth request expired", DefaultMode: mode})
+			s.renderAuthError(w, r, http.StatusBadRequest, authErrorView{
+				Title:   "Sign-in request expired",
+				Summary: "Kubernetes access was enabled, but this sign-in request timed out before it completed.",
+				Details: []template.HTML{
+					`Authorization requests are valid for a short window. This one expired before the login finished.`,
+					`Your kubeconfig was accepted — simply start the connection again from your MCP client to finish authorizing.`,
+				},
+				Steps: reconnectSteps,
+			})
 			return
 		}
 		code, err := s.issueAuthCode(authCode{

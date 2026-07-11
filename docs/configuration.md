@@ -515,13 +515,51 @@ kubeconfig = "/home/nonroot/.kube/config"
 
 `bootstrap_ui` is not compatible with `require_oauth`, `oauth_audience`, `authorization_url`, `skip_jwt_verification`, or `certificate_authority`. `server_url` may still be set when the server is behind a proxy so OAuth metadata advertises the correct public URL.
 
-Set `MCP_AUTH_SECRET` to a stable 32-byte base64url-encoded value when tokens should survive process restarts:
+##### Signing key (`MCP_AUTH_SECRET`) — persistence and rotation
 
-```shell
-MCP_AUTH_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
-```
+In bootstrap UI mode the server is **stateless**: it keeps no database or session
+store. Every OAuth artifact — the dynamic client registration (`client_id`), the
+authorization request, the authorization code, and the access token — is sealed
+(AES-256-GCM) into the token itself using `MCP_AUTH_SECRET`. Validating any of
+them means unsealing it with that same key.
 
-If `MCP_AUTH_SECRET` is not set, the server generates an ephemeral key for the current process.
+Consequences of this design:
+
+- **Set a stable secret in production.** If `MCP_AUTH_SECRET` is unset, the server
+  generates a **new ephemeral key on every process start** and logs it at `INFO`.
+  Any client that registered under the previous key can no longer be validated —
+  its `/authorize` request fails and the user is shown a *"Reconnect required"*
+  page. Persist a stable value so registrations and tokens survive restarts:
+
+  ```shell
+  MCP_AUTH_SECRET="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+  ```
+
+  With Docker Compose, put it in a `.env` file next to `docker-compose.yaml`
+  (the compose file reads `MCP_AUTH_SECRET: ${MCP_AUTH_SECRET:-}`). **Never commit
+  `.env`** — the secret can decrypt and forge every token this server issues.
+
+- **Use a unique secret per server.** Do **not** share one `MCP_AUTH_SECRET`
+  across multiple MCP servers. Servers never validate each other's tokens, so a
+  shared key buys nothing and widens blast radius: one leaked secret would let an
+  attacker forge tokens against every server that shares it. One stable, unique
+  key per server.
+
+- **Rotating the secret forces every client to re-authenticate.** Rotation is the
+  intended way to invalidate all outstanding tokens (for example after a suspected
+  leak or an operator handover). After you change `MCP_AUTH_SECRET` and restart,
+  all connected MCP clients hit the *"Reconnect required"* page **once** and must
+  reconnect. Communicate rotations to users; the reconnect procedure is:
+
+  1. In the MCP client, remove/disconnect this server so it drops the stale saved
+     credential (in Claude Code: `/mcp` → select the server → disconnect, or
+     re-run `claude mcp add`).
+  2. Reconnect / re-add the server. The client registers again automatically and
+     reopens `/kube/login`.
+  3. Complete the kubeconfig login; access is restored once validation succeeds.
+
+Access-token lifetime is controlled separately by `MCP_AUTH_ACCESS_TTL`
+(default `10h`).
 
 **Example (with client secret):**
 ```toml

@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -139,12 +140,51 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/kube/preview", s.handleKubePreview)
 }
 
+// publicMCPMethods are JSON-RPC methods a client may call WITHOUT authentication
+// so registries, catalogs, and agents can DISCOVER the toolset. Tool execution
+// (tools/call) and everything else still require a valid sealed bearer token.
+var publicMCPMethods = map[string]bool{
+	"initialize":                true,
+	"notifications/initialized": true,
+	"tools/list":                true,
+	"prompts/list":              true,
+	"resources/list":            true,
+	"resources/templates/list":  true,
+	"ping":                      true,
+}
+
+// isPublicMCPRequest reports whether the POST body is a JSON-RPC discovery method
+// that may proceed unauthenticated. It reads and RESTORES the body for the handler.
+func isPublicMCPRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost || r.Body == nil {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var rpc struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(body, &rpc); err != nil {
+		return false
+	}
+	return publicMCPMethods[rpc.Method]
+}
+
 // Protect enforces sealed-token bearer auth for protected endpoints (e.g. /mcp).
 func (s *Server) Protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			withCORSHeaders(w)
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// Discovery methods (tools/list, initialize, …) proceed without auth so
+		// registries/agents can enumerate the toolset; tool execution still 401s.
+		if isPublicMCPRequest(r) {
+			next.ServeHTTP(w, r)
 			return
 		}
 		token, ok := bearerToken(r.Header.Get("Authorization"))
